@@ -35,8 +35,10 @@ pub(super) mod windows_vti;
 /// This runs on a dedicated thread because stdin reading is blocking.
 /// The main loop receives the raw bytes and forwards them as
 /// `ClientMessage::Input` to the server.
+#[allow(clippy::too_many_arguments)]
 pub fn stdin_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
+    #[cfg(unix)] graphics_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
     host_theme_query_pending: Arc<AtomicU32>,
@@ -63,6 +65,7 @@ pub fn stdin_reader_loop(
     #[cfg(unix)]
     unix_stdin_reader_loop(
         event_tx,
+        graphics_tx,
         should_quit,
         host_color_query_sent,
         host_theme_query_pending,
@@ -77,8 +80,10 @@ pub fn stdin_reader_loop(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn unix_stdin_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
+    graphics_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
     host_theme_query_pending: Arc<AtomicU32>,
@@ -201,7 +206,10 @@ fn unix_stdin_reader_loop(
                 );
                 let chunks = if let Some((raw_chunks, responses)) = filtered {
                     for response in responses {
-                        if event_tx
+                        // Graphics replies stay ordered with server messages: a
+                        // retirement queued before the terminal's reply must be
+                        // handled first.
+                        if graphics_tx
                             .blocking_send(ClientLoopEvent::DirectGraphicsResponse(response))
                             .is_err()
                         {

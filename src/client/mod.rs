@@ -427,6 +427,11 @@ fn graphics_owner_is_active(
             .is_some_and(|shell| shell.endpoint_is_active(owner))
 }
 
+/// Consecutive host input events handled before one ready server event is
+/// taken, so sustained input cannot starve frames and endpoint events.
+#[cfg(unix)]
+const HOST_INPUT_STREAK_LIMIT: u32 = 8;
+
 /// The main client event loop.
 ///
 /// Uses a threaded architecture:
@@ -533,11 +538,11 @@ async fn run_client_loop(
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
     let (supervisor_tx, mut supervisor_rx) =
         tokio::sync::mpsc::channel::<endpoint::EndpointSupervisorEvent>(64);
-    // Keep Windows console draining independent of server-frame backpressure.
-    #[cfg(windows)]
+    // Keep host input draining independent of server-frame backpressure: a
+    // pane streaming large images can queue many frames ahead of a keystroke.
+    // The terminal's graphics replies still travel with server messages so a
+    // retirement queued before a reply is handled first.
     let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
-    #[cfg(unix)]
-    let stdin_tx = event_tx.clone();
 
     let mut endpoint_commands = endpoint_commands::EndpointCommands::default();
 
@@ -555,6 +560,8 @@ async fn run_client_loop(
     let stdin_escape_disambiguation_active = config.host_escape_disambiguation_active;
     let stdin_initial_host_input = std::mem::take(&mut config.initial_host_input);
     #[cfg(unix)]
+    let stdin_graphics_tx = event_tx.clone();
+    #[cfg(unix)]
     let stdin_direct_response = state.direct_graphics_response.clone();
     #[cfg(unix)]
     let stdin_direct_response_active = stdin_direct_response
@@ -564,6 +571,8 @@ async fn run_client_loop(
     std::thread::spawn(move || {
         input::stdin_reader_loop(
             stdin_tx,
+            #[cfg(unix)]
+            stdin_graphics_tx,
             &stdin_quit,
             will_query_host_terminal_theme,
             stdin_host_theme_query_pending,
@@ -677,8 +686,13 @@ async fn run_client_loop(
     let mut power_monitor = crate::platform::HostPowerMonitor::start(
         state.shell.is_some() && !is_remote_client && state.attach_escape.is_none(),
     );
-    #[cfg(windows)]
     let mut stdin_open = true;
+    // Host input is polled ahead of server frames. After a run of consecutive
+    // input events, take one ready server event so sustained input (key
+    // repeat, pixel mouse motion, a large paste) cannot starve frames, resizes
+    // and endpoint events.
+    #[cfg(unix)]
+    let mut host_input_streak = 0u32;
     while !should_quit.load(Ordering::Acquire) {
         if pending_activation.is_none() {
             if let Some(reload) = pending_catalog.take() {
@@ -828,12 +842,35 @@ async fn run_client_loop(
         let event = if let Some(event) = immediate_event {
             event
         } else {
-            tokio::select! {
-                biased;
-                ev = power_monitor.recv() => ClientLoopEvent::HostPower(ev),
-                _ = tokio::time::sleep_until(timer_deadline.into()) => ClientLoopEvent::Timer,
-                ev = supervisor_rx.recv() => ev.map(ClientLoopEvent::EndpointSupervisor).unwrap_or(ClientLoopEvent::Timer),
-                ev = event_rx.recv() => ev.unwrap_or(ClientLoopEvent::Timer),
+            let fair_server_event = if host_input_streak >= HOST_INPUT_STREAK_LIMIT {
+                host_input_streak = 0;
+                event_rx.try_recv().ok()
+            } else {
+                None
+            };
+            if let Some(event) = fair_server_event {
+                event
+            } else {
+                tokio::select! {
+                    biased;
+                    ev = power_monitor.recv() => ClientLoopEvent::HostPower(ev),
+                    _ = tokio::time::sleep_until(timer_deadline.into()) => ClientLoopEvent::Timer,
+                    ev = supervisor_rx.recv() => ev.map(ClientLoopEvent::EndpointSupervisor).unwrap_or(ClientLoopEvent::Timer),
+                    ev = stdin_rx.recv(), if stdin_open => match ev {
+                        Some(event) => {
+                            host_input_streak += 1;
+                            event
+                        }
+                        None => {
+                            stdin_open = false;
+                            ClientLoopEvent::Timer
+                        }
+                    },
+                    ev = event_rx.recv() => {
+                        host_input_streak = 0;
+                        ev.unwrap_or(ClientLoopEvent::Timer)
+                    }
+                }
             }
         };
         let now = std::time::Instant::now();
