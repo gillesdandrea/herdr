@@ -48,12 +48,7 @@ impl Ledger {
 
     pub(crate) fn new() -> Self {
         Self {
-            // Do not use TMPDIR/XDG_RUNTIME_DIR: a client override need not
-            // be in the terminal's accepted temporary-file roots. /tmp is
-            // explicitly accepted by Ghostty graphics_image.zig in v1.1.3,
-            // v1.2.3 and main, independent of its TMPDIR. /var/tmp is NOT
-            // generally accepted, so this bounded ledger must use /tmp.
-            root: PathBuf::from("/tmp"),
+            root: default_root(),
             directory: None,
             pending: Vec::new(),
             next: 0,
@@ -190,6 +185,29 @@ impl Drop for Ledger {
     fn drop(&mut self) {
         self.cleanup();
     }
+}
+
+/// The root the terminal accepts for `t=t` files, independent of the client's
+/// own `TMPDIR`/`XDG_RUNTIME_DIR`: a client override need not be in the
+/// terminal's accepted temporary-file roots.
+///
+/// Ghostty (graphics_image.zig, v1.1.3 through v1.3.1 and main) resolves the
+/// file path, then accepts it under the literal `/tmp` or `/dev/shm` prefixes
+/// or under its own `TMPDIR`, which it also resolves. `/var/tmp` is NOT
+/// accepted, so this bounded ledger uses `/tmp` wherever the platform has no
+/// better-known per-user temporary directory.
+///
+/// On macOS `/tmp` is a symlink to `/private/tmp`, so the resolved file path
+/// never carries the literal `/tmp` prefix: Ghostty up to v1.3.1 rejects the
+/// file as "not in a temp dir" and never consumes it (main accepts
+/// `/private/tmp` since ghostty-org/ghostty@cd432ba5). The per-user temporary
+/// directory from `confstr(_CS_DARWIN_USER_TEMP_DIR)` is what launchd exports
+/// to every process as `TMPDIR`, Ghostty included, so it matches the resolved
+/// `TMPDIR` check on every released version. Reading it from the OS rather
+/// than the environment keeps a shell override from steering files into a
+/// directory the terminal would refuse.
+fn default_root() -> PathBuf {
+    crate::platform::user_temp_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
 /// Keeping this directory descriptor locked prevents recovery by another client.
@@ -481,6 +499,25 @@ mod tests {
         broken.root = ledger.pending[0].path.clone(); // Not a directory.
         assert!(broken.prepare(b"inline").is_none());
         assert!(broken.disabled);
+    }
+
+    #[test]
+    fn default_root_is_a_terminal_accepted_temporary_directory() {
+        let root = default_root();
+        assert!(root.is_absolute());
+        assert!(root.is_dir());
+        match crate::platform::user_temp_dir() {
+            Some(user) => {
+                // Ghostty through v1.3.1 rejects resolved paths under
+                // /private/tmp, so macOS uses the per-user directory launchd
+                // exports as TMPDIR to every process, the terminal included.
+                assert!(cfg!(target_os = "macos"));
+                assert_ne!(root, Path::new("/tmp"));
+                assert_eq!(root, user);
+            }
+            None => assert_eq!(root, Path::new("/tmp")),
+        }
+        assert_eq!(Ledger::new().root, root);
     }
 
     #[test]

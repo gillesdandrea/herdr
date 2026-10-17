@@ -1427,3 +1427,30 @@ printf '%s\n' "$@" > "$HERDR_NOTIFY_ARGS"
         assert!(argv[2].contains("/tmp/herdr scrollback.txt"));
     }
 }
+
+/// The per-user temporary directory, `confstr(_CS_DARWIN_USER_TEMP_DIR)`.
+/// launchd exports it to every process as `TMPDIR`; reading it from the OS
+/// rather than the environment ignores shell overrides.
+pub(crate) fn user_temp_dir() -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: `buf` is a valid, writable buffer of `buf.len()` bytes for the
+    // duration of the call, and confstr writes at most that many bytes.
+    let len = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    // A zero return means the name is unknown or the call failed; a value
+    // larger than the buffer means the result was truncated.
+    if len == 0 || len > buf.len() {
+        return None;
+    }
+    // `len` counts the trailing NUL.
+    buf.truncate(len - 1);
+    let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(buf));
+    (path.is_absolute() && path.is_dir()).then_some(path)
+}

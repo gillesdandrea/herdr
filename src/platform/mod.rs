@@ -1044,3 +1044,15 @@ pub(crate) fn shared_ssh_control_path(
         "interactive SSH recovery requires Unix OpenSSH multiplexing",
     ))
 }
+
+/// The per-user temporary directory the host terminal is expected to accept
+/// for Kitty `t=t` files, when the platform has one distinct from `/tmp`.
+#[cfg(target_os = "macos")]
+pub(crate) fn user_temp_dir() -> Option<std::path::PathBuf> {
+    macos::user_temp_dir()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn user_temp_dir() -> Option<std::path::PathBuf> {
+    None
+}
