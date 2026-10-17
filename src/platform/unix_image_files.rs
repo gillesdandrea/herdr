@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 const MAX_FILES: usize = 8;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
-const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 // Bound even abandoned generations: at most 512 MiB per Unix user. When all
 // slots are live/recent, a new client uses inline rather than allocating more.
 const MAX_GENERATIONS: usize = 8;
